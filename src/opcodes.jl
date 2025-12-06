@@ -21,10 +21,11 @@ const CORE_OPCODES = Dict{Symbol, UInt8}(
     :NONREENTRANT   => 0x28,  # @nonreentrant - Guard
     :REQUIRE        => 0x29,  # @require - Assertion
     :EMIT           => 0x2a,  # @emit - Event log
-    :CALL           => 0x2b,  # @call - External invocation
-    :DELEGATE       => 0x2c,  # @delegate - Proxy call
-    :CREATE         => 0x2d,  # @create - Instantiate contract
-    :SELFDESTRUCT   => 0x2e,  # @selfdestruct - Terminate
+    :GENESIS_FLAW_TOKEN => 0x2b,  # @genesisFlawToken - Block 0 ASHE minting (Èṣù's Twist)
+    :CALL           => 0x2c,  # @call - External invocation
+    :DELEGATE       => 0x2d,  # @delegate - Proxy call
+    :CREATE         => 0x2e,  # @create - Instantiate contract
+    :SELFDESTRUCT   => 0x2f,  # @selfdestruct - Terminate
     # 1440 Inheritance Wallet Opcodes (Sacred Governance)
     :CANDIDATE_APPLY       => 0x30,  # @candidateApply - Begin inheritance claim (7×7 badge required)
     :COUNCIL_APPROVE       => 0x31,  # @councilApprove - Council of 12 vote
