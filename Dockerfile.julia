@@ -1,0 +1,26 @@
+FROM julia:1.9-bullseye
+
+# Install ARM64 compatible build tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy project files
+COPY Project.toml ./
+
+# Install dependencies
+RUN julia -e "using Pkg; Pkg.activate("."); Pkg.instantiate();"
+
+# Copy source and FFI files
+COPY src/ src/
+COPY ffi/ ffi/
+COPY *.jl ./
+
+# Expose HTTP port for organism-core to call
+EXPOSE 8080
+
+# Default command
+CMD ["julia", "--project", "src/cli.jl"]

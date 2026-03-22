@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  julia-ffi:
+    build:
+      context: .
+      dockerfile: Dockerfile.julia
+    ports:
+      - "8080:8080"
+    environment:
+      - JULIA_NUM_THREADS=auto
+    volumes:
+      - .:/app
+    restart: always
