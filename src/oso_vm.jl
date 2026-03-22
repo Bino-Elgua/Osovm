@@ -56,6 +56,8 @@ mutable struct VMState
     council::Vector{String}                  # Council of 12 addresses
     final_signer::String                     # Bínò (Ọbàtálá witness)
     has_inherited::Dict{String, Bool}        # Shrine → already inherited?
+    # Profiling
+    latency_log::Dict{UInt8, Vector{Float64}} # Opcode → [execution_times_ms]
 end
 
 function create_vm(; 
@@ -191,12 +193,40 @@ end
 """
 Execute a single instruction
 """
+
+function is_critical(opcode::UInt8)::Bool
+    # Sui-state dependent opcodes
+    return opcode in [0x11, 0x1f, 0x20, 0x21, 0x22, 0x30, 0x31, 0x32, 0x33, 0x34]
+end
+
+function call_ase_vault(instr::OsoCompiler.Instruction)::Any
+    # Offload to ase-vault via HTTP
+    try
+        # Simulation of HTTP call to ase-vault
+        # response = HTTP.post("http://localhost:5000/execute", body=JSON.json(instr))
+        # return JSON.parse(String(response.body))
+        return Dict("status" => "offloaded", "vault_receipt" => "v-$(hash(instr))")
+    catch e
+        return Dict("error" => "ase-vault unreachable", "details" => string(e))
+    end
+end
+
 function execute_instruction(vm::VMState, instr::OsoCompiler.Instruction)::Any
+    start_time = time()
     if vm.halted
         return nothing
     end
     
     opcode = instr.opcode
+
+    # Offload non-critical opcodes
+    if !is_critical(opcode) && opcode != 0x00 && opcode != 0x01
+        result = call_ase_vault(instr)
+        elapsed = (time() - start_time) * 1000
+        times = get!(vm.latency_log, opcode, Float64[])
+        push!(times, elapsed)
+        return result
+    end
     args = instr.args
     attr = Opcodes.get_attribute(opcode)
     
@@ -536,8 +566,14 @@ function execute_instruction(vm::VMState, instr::OsoCompiler.Instruction)::Any
     else
         # Unknown opcode - log and continue
         @warn "Unknown opcode: 0x$(string(opcode, base=16, pad=2)) ($attr)"
-        return Dict("status" => "unknown_opcode", "opcode" => opcode)
+        res = Dict("status" => "unknown_opcode", "opcode" => opcode)
     end
+    
+    elapsed = (time() - start_time) * 1000
+    times = get!(vm.latency_log, opcode, Float64[])
+    push!(times, elapsed)
+    
+    return res
 end
 
 """
@@ -548,12 +584,52 @@ function execute_ir(vm::VMState, ir::OsoCompiler.IR; sender::String="genesis")::
     vm.halted = false
     
     results = Any[]
+    batch = OsoCompiler.Instruction[]
     
     for instr in ir
+        # Batching logic: collect sequential critical opcodes
+        if is_critical(instr.opcode)
+            push!(batch, instr)
+        else
+            # Flush batch before non-critical
+            if !isempty(batch)
+                append!(results, execute_batch(vm, batch))
+                empty!(batch)
+            end
+            
+            # Execute non-critical
+            try
+                result = execute_instruction(vm, instr)
+                push!(results, result)
+            catch e
+                push!(results, Dict("error" => string(e)))
+            end
+        end
+
+        if vm.halted
+            break
+        end
+    end
+    
+    # Final flush
+    if !isempty(batch)
+        append!(results, execute_batch(vm, batch))
+    end
+    
+    return results
+end
+
+function execute_batch(vm::VMState, batch::Vector{OsoCompiler.Instruction})::Vector{Any}
+    if isempty(batch) return [] end
+    
+    # println("📦 Batching $(length(batch)) Sui transactions...")
+    start_time = time()
+    
+    results = Any[]
+    for instr in batch
         try
             result = execute_instruction(vm, instr)
             push!(results, result)
-            
             if vm.halted
                 break
             end
@@ -562,7 +638,6 @@ function execute_ir(vm::VMState, ir::OsoCompiler.IR; sender::String="genesis")::
             break
         end
     end
-    
     return results
 end
 
