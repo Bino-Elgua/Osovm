@@ -15,7 +15,7 @@ using .VeilSimScorer
 
 export SimulationState, Entity, VeilInstance, CollisionPair
 export initialize_simulation, step_simulation, batch_simulation
-export compute_metrics, anchor_simulation
+export compute_metrics, compute_f1, anchor_simulation
 export vec3_mag, vec3_dot, vec3_sub, vec3_add, vec3_scale
 
 # ============================================================================
@@ -178,7 +178,7 @@ function initialize_simulation(
     return sim
 end
 
-function _initialize_veils(veil_ids::Vector{Any}, params_map::Dict)::Vector{VeilInstance}
+function _initialize_veils(veil_ids, params_map::Dict = Dict())::Vector{VeilInstance}
     veils = VeilInstance[]
     for vid in veil_ids
         vid_int = Int(vid)
@@ -890,6 +890,39 @@ function batch_simulation(
     return sim, metrics_history
 end
 
+"""
+    compute_f1(sim::SimulationState) -> Float64
+
+Deterministic F1 helper derived from the same target/tolerance logic used by
+`compute_metrics`, without mutating the simulation state.
+"""
+function compute_f1(sim::SimulationState)::Float64
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+
+    for entity in sim.entities
+        err = vec3_sub(entity.position, entity.target_position)
+        pos_error = vec3_mag(err)
+        within_tolerance = pos_error <= entity.position_tolerance
+        speed = vec3_mag(entity.velocity)
+        settling = within_tolerance && speed < 1.0
+        force_mag = vec3_mag(entity.state.total_force)
+        veils_active = force_mag > 1e-6 && !isempty(entity.veils)
+
+        if within_tolerance && (veils_active || settling)
+            total_tp += 1
+        elseif within_tolerance && !veils_active && !settling
+            total_fp += 1
+        elseif !within_tolerance && veils_active
+            total_fn += 1
+        end
+    end
+
+    p = total_tp + total_fp > 0 ? total_tp / (total_tp + total_fp) : 0.0
+    r = total_tp + total_fn > 0 ? total_tp / (total_tp + total_fn) : 0.0
+    p + r > 0 ? 2.0 * (p * r) / (p + r) : 0.0
+end
 # ============================================================================
 # 10. BLOCKCHAIN ANCHORING
 # ============================================================================
