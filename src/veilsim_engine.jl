@@ -797,27 +797,20 @@ end
 # 8. METRICS & F1 SCORING
 # ============================================================================
 
-function compute_metrics(sim::SimulationState)::SimulationMetrics
+function compute_f1(sim::SimulationState)::Float64
     total_tp = 0
     total_fp = 0
     total_fn = 0
     total_tn = 0
-    total_energy = 0.0
-    convergence_sum = 0.0
 
     for entity in sim.entities
-        total_energy += entity.state.kinetic_energy + entity.state.potential_energy
-
-        # Position error
         err = vec3_sub(entity.position, entity.target_position)
         pos_error = vec3_mag(err)
         within_tolerance = pos_error <= entity.position_tolerance
 
-        # Velocity check: is entity settling (low velocity near target)?
         speed = vec3_mag(entity.velocity)
         settling = within_tolerance && speed < 1.0
 
-        # Veil activity
         force_mag = vec3_mag(entity.state.total_force)
         veils_active = force_mag > 1e-6 && !isempty(entity.veils)
 
@@ -830,15 +823,27 @@ function compute_metrics(sim::SimulationState)::SimulationMetrics
         else
             total_tn += 1
         end
+    end
 
-        # Convergence rate: how quickly error is decreasing
+    p = total_tp + total_fp > 0 ? total_tp / (total_tp + total_fp) : 0.0
+    r = total_tp + total_fn > 0 ? total_tp / (total_tp + total_fn) : 0.0
+    return p + r > 0 ? 2.0 * (p * r) / (p + r) : 0.0
+end
+
+function compute_metrics(sim::SimulationState)::SimulationMetrics
+    total_energy = 0.0
+    convergence_sum = 0.0
+
+    for entity in sim.entities
+        total_energy += entity.state.kinetic_energy + entity.state.potential_energy
+
+        err = vec3_sub(entity.position, entity.target_position)
+        pos_error = vec3_mag(err)
+
         convergence_sum += 1.0 / (1.0 + pos_error)
     end
 
-    # F1
-    p = total_tp + total_fp > 0 ? total_tp / (total_tp + total_fp) : 0.0
-    r = total_tp + total_fn > 0 ? total_tp / (total_tp + total_fn) : 0.0
-    f1 = p + r > 0 ? 2.0 * (p * r) / (p + r) : 0.0
+    f1 = compute_f1(sim)
 
     sim.metrics.f1_score = f1
     sim.metrics.convergence_rate = convergence_sum / max(length(sim.entities), 1)
