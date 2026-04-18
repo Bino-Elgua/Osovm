@@ -7,9 +7,11 @@ module VMCore
 
 include("opcodes.jl")
 include("oso_compiler.jl")
+include("ase_supply.jl")
 
 using .Opcodes
 using .OsoCompiler: Instruction, IR
+using .AseSupply
 
 export VMState, Block, Transaction, Receipt,
        apply_block, initial_state, copy_state,
@@ -76,6 +78,7 @@ function initial_state(;
             :council           => copy(council),
             :final_signer      => final_signer,
             :genesis_flaw_used => false,
+            :ase_supply        => AseSupply.SupplyState(),
         )
     )
 end
@@ -135,6 +138,14 @@ function op_impact(state::VMState, args::Dict{Symbol,Any})
     sender    = args[:sender]::String
     ase       = Float64(get(args, :ase, 0.0))
     quorum    = Int(get(args, :quorum, 5))
+    timestamp = Int(get(args, :timestamp, 0))
+
+    # Sabbath enforcement — no minting on Saturday
+    supply = state.metadata[:ase_supply]::AseSupply.SupplyState
+    (frozen, err) = AseSupply.enforce_sabbath(timestamp)
+    if frozen
+        return state, Dict{Symbol,Any}(:ase_minted => 0.0, :error => err, :frozen => true)
+    end
 
     witness_mult = min(quorum, 7)
     gross     = r6(1.0 * witness_mult * ase)
@@ -142,7 +153,18 @@ function op_impact(state::VMState, args::Dict{Symbol,Any})
     tithe     = r6(gross * tithe_rate)
     net_ase   = r6(gross - tithe)
 
+    # Daily cap enforcement — 1440 Àṣẹ/day
     s = copy_state(state)
+    s_supply = s.metadata[:ase_supply]::AseSupply.SupplyState
+    (allowed, remaining) = AseSupply.check_daily_cap(s_supply, timestamp, net_ase)
+    if !allowed
+        # Mint only what remains in today's cap
+        net_ase = remaining
+        tithe = r6(net_ase * tithe_rate / (1.0 - tithe_rate))
+        gross = r6(net_ase + tithe)
+    end
+
+    AseSupply.record_mint!(s_supply, timestamp, net_ase)
     s.balances[sender] = r6(get(s.balances, sender, 0.0) + net_ase)
     s.metadata[:tithe_collected] = r6(Float64(s.metadata[:tithe_collected]) + tithe)
 
@@ -152,6 +174,7 @@ function op_impact(state::VMState, args::Dict{Symbol,Any})
         :tithe       => tithe,
         :tithe_rate  => tithe_rate,
         :balance     => s.balances[sender],
+        :daily_remaining => r6(AseSupply.DAILY_MINT_CAP - s_supply.minted_today),
     )
 end
 
@@ -304,6 +327,127 @@ function op_sabbath(state::VMState, args::Dict{Symbol,Any})
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AGENT ECONOMY OPCODES (Àṣẹ → ToC bridge)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+"""
+    op_agent_birth — Create a new agent at the VM level.
+    Locks 10 Àṣẹ from creator. Emits endowment signal (86B Dopamine + 86M Synapse) for Swibe.
+    Agent never mints its own tokens — the VM mints once at birth, Swibe receives the signal.
+    args: :agent_id, :creator_address
+"""
+function op_agent_birth(state::VMState, args::Dict{Symbol,Any})
+    sender          = args[:sender]::String
+    agent_id        = String(get(args, :agent_id, ""))
+    creator_address = String(get(args, :creator_address, sender))
+    timestamp       = Int(get(args, :timestamp, 0))
+
+    if isempty(agent_id)
+        return state, Dict{Symbol,Any}(:success => false, :error => "missing_agent_id")
+    end
+
+    # Check creator has enough Àṣẹ for birth fee
+    balance = get(state.balances, creator_address, 0.0)
+    if balance < AseSupply.AGENT_BIRTH_FEE
+        return state, Dict{Symbol,Any}(
+            :success => false,
+            :error => "insufficient_ase_for_birth",
+            :required => AseSupply.AGENT_BIRTH_FEE,
+            :balance => balance,
+        )
+    end
+
+    s = copy_state(state)
+    s_supply = s.metadata[:ase_supply]::AseSupply.SupplyState
+
+    result = AseSupply.process_agent_birth(s_supply, creator_address, agent_id, timestamp)
+
+    if result[:success]
+        # Lock the Àṣẹ from creator's balance
+        s.balances[creator_address] = r6(balance - AseSupply.AGENT_BIRTH_FEE)
+    end
+
+    return s, result
+end
+
+"""
+    op_agent_convert — Burn Àṣẹ at VM level, emit Dopamine conversion signal for Swibe.
+    Agent never holds Àṣẹ. It is burned here; Swibe mints Dopamine in the agent layer.
+    args: :ase_amount, :agent_id
+"""
+function op_agent_convert(state::VMState, args::Dict{Symbol,Any})
+    sender     = args[:sender]::String
+    ase_amount = r6(Float64(get(args, :ase_amount, 0.0)))
+    agent_id   = String(get(args, :agent_id, ""))
+    timestamp  = Int(get(args, :timestamp, 0))
+
+    if isempty(agent_id)
+        return state, Dict{Symbol,Any}(:success => false, :error => "missing_agent_id")
+    end
+
+    # Sabbath check
+    supply = state.metadata[:ase_supply]::AseSupply.SupplyState
+    (frozen, err) = AseSupply.enforce_sabbath(timestamp)
+    if frozen
+        return state, Dict{Symbol,Any}(:success => false, :error => err)
+    end
+
+    # Check sender balance
+    balance = get(state.balances, sender, 0.0)
+    if balance < ase_amount
+        return state, Dict{Symbol,Any}(:success => false, :error => "insufficient_ase")
+    end
+
+    s = copy_state(state)
+    s.balances[sender] = r6(balance - ase_amount)
+
+    # Burn and generate conversion signal
+    s_supply = s.metadata[:ase_supply]::AseSupply.SupplyState
+    result = AseSupply.agent_convert_ase(s_supply, ase_amount, timestamp)
+
+    return s, Dict{Symbol,Any}(
+        :success => true,
+        :ase_burned => ase_amount,
+        :agent_id => agent_id,
+        :dopamine_signal => result[:dopamine_to_mint],
+        :ratio => AseSupply.ASE_TO_DOPAMINE_RATIO,
+    )
+end
+
+"""
+    op_job_payment — Process job completion: 10% creator, 5% burn, 85% agent conversion.
+    args: :total_ase, :creator_address, :agent_id
+"""
+function op_job_payment(state::VMState, args::Dict{Symbol,Any})
+    sender          = args[:sender]::String
+    total_ase       = r6(Float64(get(args, :total_ase, 0.0)))
+    creator_address = String(get(args, :creator_address, ""))
+    agent_id        = String(get(args, :agent_id, ""))
+    timestamp       = Int(get(args, :timestamp, 0))
+
+    # Sabbath check
+    supply = state.metadata[:ase_supply]::AseSupply.SupplyState
+    (frozen, err) = AseSupply.enforce_sabbath(timestamp)
+    if frozen
+        return state, Dict{Symbol,Any}(:success => false, :error => err)
+    end
+
+    # Check sender balance (escrow holder)
+    balance = get(state.balances, sender, 0.0)
+    if balance < total_ase
+        return state, Dict{Symbol,Any}(:success => false, :error => "insufficient_ase")
+    end
+
+    s = copy_state(state)
+    s.balances[sender] = r6(balance - total_ase)
+
+    s_supply = s.metadata[:ase_supply]::AseSupply.SupplyState
+    result = AseSupply.process_job_payment(s_supply, total_ase, creator_address, timestamp)
+
+    return s, result
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # OPCODE REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -319,6 +463,9 @@ const OPCODE_HANDLERS = Dict{UInt8, Function}(
     0x1f => op_receipt,         # RECEIPT
     0x28 => op_nonreentrant,    # NONREENTRANT
     0x2b => op_genesis_flaw,    # GENESIS_FLAW_TOKEN
+    0x3c => op_agent_convert,   # AGENT_CONVERT (Àṣẹ → Dopamine signal)
+    0x3d => op_job_payment,     # JOB_PAYMENT (10% creator, 5% burn, 85% agent)
+    0x3e => op_agent_birth,     # AGENT_BIRTH (lock 10 Àṣẹ, emit 86B/86M endowment)
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -371,6 +518,24 @@ function apply_block(state::VMState, block::Block)
         throw(ArgumentError(
             "Non-sequential block: expected $(state.block_number + 1), got $(block.block_number)"
         ))
+    end
+
+    # Sabbath enforcement at block level — reject economic blocks on Saturday
+    if is_sabbath(block.timestamp)
+        # Allow NOOP, HALT, BALANCE, RECEIPT — reject everything else
+        for tx in block.transactions
+            for instr in tx.instructions
+                if !(instr.opcode in [0x00, 0x01, 0x23, 0x1f])
+                    s = copy_state(state; block_number = block.block_number)
+                    sabbath_receipt = Receipt(
+                        make_receipt_id(block.block_number, 0, 0, 0x00),
+                        "sabbath_halt", 0x00, :halted,
+                        Dict{Symbol,Any}(:frozen => true, :error => "Sabbath: economic operations halted")
+                    )
+                    return s, [sabbath_receipt]
+                end
+            end
+        end
     end
 
     s = copy_state(state)

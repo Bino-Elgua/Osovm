@@ -39,7 +39,11 @@ const CORE_OPCODES = Dict{Symbol, UInt8}(
     :ORIGIN         => 0x38,  # @origin - Transaction sender
     :GASPRICE       => 0x39,  # @gasprice - Fee rate
     :COINBASE       => 0x3a,  # @coinbase - Miner address
-    :DIFFICULTY     => 0x3b   # @difficulty - PoW metric
+    :DIFFICULTY     => 0x3b,  # @difficulty - PoW metric
+    # Agent Economy Opcodes (Àṣẹ → ToC bridge)
+    :AGENT_CONVERT  => 0x3c,  # @agentConvert - Burn Àṣẹ → Dopamine signal for Swibe
+    :JOB_PAYMENT    => 0x3d,  # @jobPayment - 10% creator, 5% burn, 85% agent conversion
+    :AGENT_BIRTH    => 0x3e,  # @agentBirth - Lock 10 Àṣẹ, emit 86B Dopamine + 86M Synapse
 )
 
 # Expansion Attributes (130) — DSL Extensions, semantic only
